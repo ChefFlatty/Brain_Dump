@@ -333,13 +333,13 @@ function App() {
       setUser(u);
       setAuthReady(true);
       if (!u) setShowLogin(true);
-      else syncAll(u.id);
+      else { syncAll(u.id); loadRemoteKey(u.id); }
     });
 
     const { data: { subscription } } = sb.auth.onAuthStateChange((_event, session) => {
       const u = session?.user ?? null;
       setUser(u);
-      if (u) { setShowLogin(false); syncAll(u.id); }
+      if (u) { setShowLogin(false); syncAll(u.id); loadRemoteKey(u.id); }
       else setSyncStatus("idle");
     });
 
@@ -408,9 +408,21 @@ function App() {
     showToast("Cleared.");
   };
 
-  const saveKey = (k) => {
+  const saveKey = async (k) => {
     setApiKey(k);
     localStorage.setItem(APIKEY_KEY, k);
+    // Sync to Supabase if logged in
+    if (user) {
+      await sb.from("settings").upsert({ user_id: user.id, anthropic_key: k }, { onConflict: "user_id" });
+    }
+  };
+
+  const loadRemoteKey = async (uid) => {
+    const { data } = await sb.from("settings").select("anthropic_key").eq("user_id", uid).single();
+    if (data?.anthropic_key) {
+      setApiKey(data.anthropic_key);
+      localStorage.setItem(APIKEY_KEY, data.anthropic_key);
+    }
   };
 
   // ── Organize with Claude ───────────────────────────────────────────────────

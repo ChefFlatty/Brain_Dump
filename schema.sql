@@ -24,3 +24,22 @@ create policy "owner_all" on notes
   for all
   using  (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+
+-- Grant table access to authenticated users
+grant all on public.notes to authenticated;
+
+-- Settings table (one row per user, stores synced API key)
+create table if not exists settings (
+  user_id       uuid primary key references auth.users on delete cascade,
+  anthropic_key text
+);
+
+alter table settings enable row level security;
+
+drop policy if exists "owner_all" on settings;
+create policy "owner_all" on settings
+  for all
+  using  (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+grant all on public.settings to authenticated;
