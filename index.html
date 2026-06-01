@@ -9,6 +9,7 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; background: #0a0a0a; }
@@ -32,23 +33,57 @@
       100% { opacity: 0; }
     }
     @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+    @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
     .note-new { animation: slideIn 0.2s ease; }
     .toast    { animation: toastIn 2.2s ease forwards; }
     .pulse    { animation: pulse 1.4s ease-in-out infinite; display:inline-block; }
+    .login-overlay { animation: fadeIn 0.2s ease; }
   </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useRef } = React;
+const { useState, useEffect, useRef, useCallback } = React;
 
+// ─── Supabase ────────────────────────────────────────────────────────────────
+const SUPABASE_URL = "https://pugddmfdichgghiocoym.supabase.co";
+const SUPABASE_KEY = "sb_publishable_xDg6N-K18ZIePDavAN_Fpg_dG496IR5";
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ─── Constants ───────────────────────────────────────────────────────────────
 const NOTES_KEY   = "braindump-notes";
 const ACTIONS_KEY = "braindump-actions";
 const APIKEY_KEY  = "braindump-apikey";
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+const genId = () =>
+  (typeof crypto !== "undefined" && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
+const getDeviceType = () =>
+  /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ? "mobile" : "desktop";
+
 const fmt = (iso) => new Date(iso).toLocaleString("en-US", {
-  month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true
+  month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true,
 });
+
+// Add fields that older stored notes may be missing
+const migrateNote = (n) => ({
+  ...n,
+  id:          typeof n.id === "number" ? genId() : n.id,
+  device_type: n.device_type || getDeviceType(),
+  synced:      n.synced ?? false,
+});
+
+const loadLocal = () => {
+  try { return (JSON.parse(localStorage.getItem(NOTES_KEY) || "[]")).map(migrateNote); }
+  catch { return []; }
+};
+
+const saveLocal = (notes) => {
+  localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
+};
 
 const COLOR = {
   red:    { bg:"#2a1010", border:"#c0392b", dot:"#e74c3c" },
@@ -59,65 +94,310 @@ const COLOR = {
   slate:  { bg:"#141a20", border:"#2c3e50", dot:"#566573" },
 };
 
+// ─── Login screen ────────────────────────────────────────────────────────────
+function LoginScreen({ onDismiss }) {
+  const [email, setEmail]   = useState("");
+  const [pass,  setPass]    = useState("");
+  const [mode,  setMode]    = useState("in");   // "in" | "up"
+  const [err,   setErr]     = useState("");
+  const [busy,  setBusy]    = useState(false);
+
+  const submit = async () => {
+    if (!email.trim() || !pass.trim()) { setErr("Email and password required."); return; }
+    setBusy(true); setErr("");
+    const fn = mode === "in"
+      ? sb.auth.signInWithPassword({ email: email.trim(), password: pass })
+      : sb.auth.signUp({ email: email.trim(), password: pass });
+    const { error } = await fn;
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    if (mode === "up") setErr("Check your email to confirm your account, then sign in.");
+  };
+
+  const S = {
+    overlay: { position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", zIndex:100, display:"flex", alignItems:"center", justifyContent:"center", padding:24 },
+    box:     { background:"#111", border:"1px solid #2a2a2a", borderRadius:10, padding:"32px 28px", width:"100%", maxWidth:360 },
+    title:   { fontFamily:"'Bebas Neue',sans-serif", fontSize:24, letterSpacing:3, color:"#f5f5f5", marginBottom:4 },
+    sub:     { fontSize:11, color:"#555", letterSpacing:1, marginBottom:24 },
+    label:   { fontSize:10, color:"#555", letterSpacing:1, marginBottom:4, display:"block" },
+    input:   { width:"100%", background:"#0d0d0d", border:"1px solid #2a2a2a", borderRadius:5, color:"#e0e0e0", fontSize:13, padding:"10px 12px", marginBottom:12, fontFamily:"inherit" },
+    btn:     { width:"100%", background:"#e8e8e8", color:"#0a0a0a", border:"none", borderRadius:6, padding:"11px", fontSize:13, fontWeight:500, cursor:"pointer", letterSpacing:1, fontFamily:"inherit", marginBottom:10 },
+    toggle:  { background:"none", border:"none", color:"#555", fontSize:11, cursor:"pointer", letterSpacing:1, fontFamily:"inherit", width:"100%", textAlign:"center", marginBottom:8 },
+    dismiss: { background:"none", border:"none", color:"#333", fontSize:10, cursor:"pointer", letterSpacing:1, fontFamily:"inherit", width:"100%", textAlign:"center", marginTop:4 },
+    err:     { fontSize:11, color:"#c0392b", marginBottom:12, lineHeight:1.5 },
+    ok:      { fontSize:11, color:"#27ae60", marginBottom:12, lineHeight:1.5 },
+  };
+
+  const isOk = err.startsWith("Check your email");
+
+  return (
+    <div className="login-overlay" style={S.overlay}>
+      <div style={S.box}>
+        <div style={S.title}>BRAIN DUMP</div>
+        <div style={S.sub}>SIGN IN TO SYNC ACROSS DEVICES</div>
+
+        <label style={S.label}>EMAIL</label>
+        <input type="email" value={email} onChange={e=>setEmail(e.target.value)} style={S.input} placeholder="you@example.com" autoComplete="email" />
+
+        <label style={S.label}>PASSWORD</label>
+        <input type="password" value={pass} onChange={e=>setPass(e.target.value)}
+          style={S.input} placeholder="••••••••" autoComplete={mode==="in"?"current-password":"new-password"}
+          onKeyDown={e=>{ if(e.key==="Enter") submit(); }} />
+
+        {err && <div style={isOk ? S.ok : S.err}>{err}</div>}
+
+        <button style={{...S.btn, opacity:busy?0.5:1}} onClick={submit} disabled={busy}>
+          {busy ? "…" : mode==="in" ? "SIGN IN" : "CREATE ACCOUNT"}
+        </button>
+        <button style={S.toggle} onClick={()=>{ setMode(m=>m==="in"?"up":"in"); setErr(""); }}>
+          {mode==="in" ? "No account? Create one →" : "← Back to sign in"}
+        </button>
+        <button style={S.dismiss} onClick={onDismiss}>
+          Continue without syncing
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Sync status badge ────────────────────────────────────────────────────────
+function SyncBadge({ status, user, onSignIn, onSignOut }) {
+  const label = {
+    idle:    "OFFLINE",
+    syncing: "SYNCING",
+    synced:  "SYNCED",
+    error:   "SYNC ERR",
+  }[status] || "OFFLINE";
+
+  const color = {
+    idle:    "#333",
+    syncing: "#d68910",
+    synced:  "#1e8449",
+    error:   "#c0392b",
+  }[status] || "#333";
+
+  return (
+    <div style={{display:"flex", alignItems:"center", gap:8}}>
+      {user ? (
+        <>
+          <span style={{fontSize:9, letterSpacing:1.5, color, fontFamily:"inherit"}}>{label}</span>
+          <button
+            onClick={onSignOut}
+            title="Sign out"
+            style={{background:"none",border:"1px solid #222",color:"#444",fontSize:9,letterSpacing:1,padding:"3px 7px",borderRadius:3,cursor:"pointer",fontFamily:"inherit"}}>
+            OUT
+          </button>
+        </>
+      ) : (
+        <button
+          onClick={onSignIn}
+          style={{background:"none",border:"1px solid #2a2a2a",color:"#555",fontSize:9,letterSpacing:1.5,padding:"3px 9px",borderRadius:3,cursor:"pointer",fontFamily:"inherit"}}>
+          SIGN IN
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ─── Device badge ─────────────────────────────────────────────────────────────
+function DeviceBadge({ type }) {
+  if (!type || type === getDeviceType()) return null;  // only show for notes from other devices
+  return (
+    <span style={{fontSize:9,letterSpacing:1,color:"#3a3a3a",border:"1px solid #222",borderRadius:3,padding:"1px 5px",marginLeft:4,whiteSpace:"nowrap"}}>
+      {type === "mobile" ? "📱" : "🖥"}
+    </span>
+  );
+}
+
+// ─── App ─────────────────────────────────────────────────────────────────────
 function App() {
-  const [notes,   setNotes]   = useState([]);
-  const [actions, setActions] = useState(null);
-  const [input,   setInput]   = useState("");
-  const [loading, setLoading] = useState(false);
-  const [view,    setView]    = useState("notes");
-  const [toast,   setToast]   = useState(null);
-  const [apiKey,  setApiKey]  = useState("");
-  const [showKey, setShowKey] = useState(false);
+  const [notes,       setNotes]       = useState([]);
+  const [actions,     setActions]     = useState(null);
+  const [input,       setInput]       = useState("");
+  const [loading,     setLoading]     = useState(false);
+  const [view,        setView]        = useState("notes");
+  const [toast,       setToast]       = useState(null);
+  const [apiKey,      setApiKey]      = useState("");
+  const [showKey,     setShowKey]     = useState(false);
+  const [user,        setUser]        = useState(null);
+  const [authReady,   setAuthReady]   = useState(false);
+  const [showLogin,   setShowLogin]   = useState(false);
+  const [syncStatus,  setSyncStatus]  = useState("idle");
   const inputRef = useRef(null);
 
-  // Load from localStorage on mount + auto-save ?note= param
-  useEffect(() => {
-    let loadedNotes = [];
-    try { const n = localStorage.getItem(NOTES_KEY);   if (n) { loadedNotes = JSON.parse(n); setNotes(loadedNotes); } } catch(_){}
-    try { const a = localStorage.getItem(ACTIONS_KEY); if (a) setActions(JSON.parse(a)); } catch(_){}
-    try { const k = localStorage.getItem(APIKEY_KEY);  if (k) setApiKey(k); } catch(_){}
-
-    // Auto-save note from Siri shortcut URL param
-    const params = new URLSearchParams(window.location.search);
-    const urlNote = params.get("note");
-    if (urlNote && urlNote.trim()) {
-      const newNote = { id: Date.now(), text: urlNote.trim(), ts: new Date().toISOString() };
-      const updated = [newNote, ...loadedNotes];
-      setNotes(updated);
-      localStorage.setItem(NOTES_KEY, JSON.stringify(updated));
-      setToast("Note saved automatically ✓");
-      setTimeout(() => setToast(null), 2200);
-      // Clean the URL so reloading doesn't re-save
-      window.history.replaceState({}, "", window.location.pathname);
-    }
-  }, []);
-
-  const saveKey = (k) => {
-    setApiKey(k);
-    localStorage.setItem(APIKEY_KEY, k);
-  };
+  // Keep a ref of user so callbacks that close over it see the latest value
+  const userRef = useRef(user);
+  useEffect(() => { userRef.current = user; }, [user]);
 
   const showToast = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
   };
 
-  const saveNote = () => {
+  // ── Supabase sync ──────────────────────────────────────────────────────────
+
+  const pushNote = async (note, uid) => {
+    const { error } = await sb.from("notes").upsert({
+      id:          note.id,
+      user_id:     uid,
+      text:        note.text,
+      ts:          note.ts,
+      device_type: note.device_type,
+    }, { onConflict: "id" });
+    return !error;
+  };
+
+  const softDelete = async (noteId) => {
+    await sb.from("notes")
+      .update({ deleted_at: new Date().toISOString() })
+      .eq("id", noteId);
+  };
+
+  const syncAll = useCallback(async (uid) => {
+    if (!uid || !navigator.onLine) return;
+    setSyncStatus("syncing");
+    try {
+      const local = loadLocal();
+
+      // 1. Push unsynced local notes to Supabase
+      const pushResults = await Promise.all(
+        local.filter(n => !n.synced).map(async n => {
+          const ok = await pushNote(n, uid);
+          return { id: n.id, ok };
+        })
+      );
+      const pushedIds = new Set(pushResults.filter(r => r.ok).map(r => r.id));
+
+      // 2. Pull remote notes (from all devices)
+      const { data: remote, error } = await sb.from("notes")
+        .select("id, text, ts, device_type")
+        .eq("user_id", uid)
+        .is("deleted_at", null)
+        .order("ts", { ascending: false });
+
+      if (error) throw error;
+
+      const localIdSet = new Set(local.map(n => n.id));
+
+      // Notes from other devices that we don't have locally
+      const inbound = (remote || [])
+        .filter(r => !localIdSet.has(r.id))
+        .map(r => ({ id: r.id, text: r.text, ts: r.ts, device_type: r.device_type, synced: true }));
+
+      // Mark pushed notes as synced
+      const updated = local.map(n =>
+        pushedIds.has(n.id) ? { ...n, synced: true } : n
+      );
+
+      const merged = [...inbound, ...updated]
+        .sort((a, b) => new Date(b.ts) - new Date(a.ts));
+
+      saveLocal(merged);
+      setNotes(merged);
+      setSyncStatus("synced");
+    } catch (e) {
+      console.error("Sync error:", e);
+      setSyncStatus("error");
+    }
+  }, []);
+
+  // ── Mount: load storage, handle Siri param, init auth ─────────────────────
+  useEffect(() => {
+    let loadedNotes = loadLocal();
+
+    try { const a = localStorage.getItem(ACTIONS_KEY); if (a) setActions(JSON.parse(a)); } catch(_){}
+    try { const k = localStorage.getItem(APIKEY_KEY);  if (k) setApiKey(k); } catch(_){}
+
+    // Siri shortcut: ?note=... — save to localStorage immediately, before any auth check
+    const params  = new URLSearchParams(window.location.search);
+    const urlNote = params.get("note");
+    if (urlNote && urlNote.trim()) {
+      const newNote = {
+        id:          genId(),
+        text:        urlNote.trim(),
+        ts:          new Date().toISOString(),
+        device_type: getDeviceType(),
+        synced:      false,
+      };
+      loadedNotes = [newNote, ...loadedNotes];
+      saveLocal(loadedNotes);
+      showToast("Note saved automatically ✓");
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+
+    setNotes(loadedNotes);
+
+    // Auth check
+    sb.auth.getSession().then(({ data: { session } }) => {
+      const u = session?.user ?? null;
+      setUser(u);
+      setAuthReady(true);
+      if (!u) setShowLogin(true);
+      else syncAll(u.id);
+    });
+
+    const { data: { subscription } } = sb.auth.onAuthStateChange((_event, session) => {
+      const u = session?.user ?? null;
+      setUser(u);
+      if (u) { setShowLogin(false); syncAll(u.id); }
+      else setSyncStatus("idle");
+    });
+
+    // Re-sync on reconnect or tab focus
+    const onOnline = () => { if (userRef.current) syncAll(userRef.current.id); };
+    const onFocus  = () => { if (userRef.current) syncAll(userRef.current.id); };
+    window.addEventListener("online", onOnline);
+    window.addEventListener("focus",  onFocus);
+
+    return () => {
+      subscription.unsubscribe();
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("focus",  onFocus);
+    };
+  }, [syncAll]);
+
+  // ── Note CRUD ──────────────────────────────────────────────────────────────
+  const saveNote = async () => {
     const text = input.trim();
     if (!text) return;
-    const newNote = { id: Date.now(), text, ts: new Date().toISOString() };
+    const newNote = {
+      id:          genId(),
+      text,
+      ts:          new Date().toISOString(),
+      device_type: getDeviceType(),
+      synced:      false,
+    };
+
+    // localStorage first — always
     const updated = [newNote, ...notes];
     setNotes(updated);
-    localStorage.setItem(NOTES_KEY, JSON.stringify(updated));
+    saveLocal(updated);
     setInput("");
     showToast("Saved.");
     inputRef.current?.focus();
+
+    // Then sync if possible
+    if (user && navigator.onLine) {
+      const ok = await pushNote(newNote, user.id);
+      if (ok) {
+        const final = loadLocal().map(n => n.id === newNote.id ? { ...n, synced: true } : n);
+        saveLocal(final);
+        setNotes(final);
+        setSyncStatus("synced");
+      }
+    }
   };
 
-  const deleteNote = (id) => {
-    const updated = notes.filter(n => n.id !== id);
+  const deleteNote = async (id) => {
+    const current = loadLocal();
+    const note    = current.find(n => n.id === id);
+    const updated = current.filter(n => n.id !== id);
     setNotes(updated);
-    localStorage.setItem(NOTES_KEY, JSON.stringify(updated));
+    saveLocal(updated);
+
+    if (user && note?.synced && navigator.onLine) {
+      await softDelete(id);
+    }
   };
 
   const clearAll = () => {
@@ -128,6 +408,12 @@ function App() {
     showToast("Cleared.");
   };
 
+  const saveKey = (k) => {
+    setApiKey(k);
+    localStorage.setItem(APIKEY_KEY, k);
+  };
+
+  // ── Organize with Claude ───────────────────────────────────────────────────
   const organizeNotes = async () => {
     if (!notes.length) return;
     if (!apiKey.trim()) { setShowKey(true); showToast("Add your API key first."); return; }
@@ -141,7 +427,7 @@ function App() {
           "Content-Type": "application/json",
           "x-api-key": apiKey.trim(),
           "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true"
+          "anthropic-dangerous-direct-browser-access": "true",
         },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
@@ -167,12 +453,12 @@ Rules:
 - Collapse redundant notes
 - Preserve urgency when implied
 - 1-6 groups max`,
-          messages: [{ role: "user", content: `Here are my raw notes:\n\n${dump}` }]
-        })
+          messages: [{ role: "user", content: `Here are my raw notes:\n\n${dump}` }],
+        }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error.message);
-      const text = data.content.map(b => b.text || "").join("");
+      const text   = data.content.map(b => b.text || "").join("");
       const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
       setActions(parsed);
       localStorage.setItem(ACTIONS_KEY, JSON.stringify(parsed));
@@ -182,38 +468,50 @@ Rules:
     setLoading(false);
   };
 
+  // ── Styles (unchanged from original) ──────────────────────────────────────
   const S = {
-    wrap: { minHeight:"100vh", background:"#0a0a0a", fontFamily:"'DM Mono','Courier New',monospace", color:"#e8e8e8", display:"flex", flexDirection:"column" },
-    header: { borderBottom:"1px solid #1e1e1e", padding:"20px 24px 16px", display:"flex", alignItems:"flex-end", justifyContent:"space-between" },
-    title: { fontFamily:"'Bebas Neue',sans-serif", fontSize:32, letterSpacing:3, color:"#f5f5f5", lineHeight:1 },
-    subtitle: { fontSize:11, color:"#555", letterSpacing:1, marginTop:4 },
-    tabBtn: (active) => ({ background: active?"#1e1e1e":"transparent", border:`1px solid ${active?"#444":"#222"}`, color: active?"#f5f5f5":"#555", padding:"6px 14px", borderRadius:4, fontSize:11, letterSpacing:1.5, cursor:"pointer", textTransform:"uppercase" }),
-    capture: { padding:"16px 24px", borderBottom:"1px solid #1a1a1a", background:"#0d0d0d" },
-    textarea: { flex:1, background:"#141414", border:"1px solid #2a2a2a", borderRadius:6, color:"#f0f0f0", fontSize:14, padding:"10px 14px", resize:"none", fontFamily:"inherit", lineHeight:1.5 },
-    saveBtn: { background:"#e8e8e8", color:"#0a0a0a", border:"none", borderRadius:6, padding:"10px 18px", fontSize:13, fontWeight:500, cursor:"pointer", letterSpacing:1, fontFamily:"inherit", height:56 },
-    organizeBtn: (loading) => ({ background:"transparent", border:"1px solid #333", color:loading?"#555":"#aaa", fontSize:11, letterSpacing:1.5, padding:"5px 14px", borderRadius:4, cursor:loading?"not-allowed":"pointer", fontFamily:"inherit" }),
-    content: { flex:1, overflow:"auto", padding:"16px 24px" },
-    empty: { textAlign:"center", color:"#2a2a2a", marginTop:60 },
-    noteRow: { background:"#111", border:"1px solid #1e1e1e", borderRadius:6, padding:"12px 14px", display:"flex", gap:12, alignItems:"flex-start", position:"relative" },
-    noteTs: { fontSize:10, color:"#3a3a3a", letterSpacing:1, paddingTop:2, minWidth:70 },
-    noteText: { flex:1, fontSize:13, lineHeight:1.6, color:"#d0d0d0" },
-    delBtn: { background:"none", border:"none", color:"#555", cursor:"pointer", fontSize:14, opacity:0, transition:"opacity 0.15s", padding:"0 4px" },
-    clearBtn: { background:"none", border:"1px dashed #1e1e1e", color:"#333", fontSize:11, letterSpacing:1.5, padding:"10px", borderRadius:6, cursor:"pointer", marginTop:8, fontFamily:"inherit", width:"100%" },
-    keyArea: { marginTop:12, display:"flex", gap:8, alignItems:"center" },
-    keyInput: { flex:1, background:"#141414", border:"1px solid #2a2a2a", borderRadius:4, color:"#aaa", fontSize:11, padding:"7px 10px", fontFamily:"inherit" },
-    keyBtn: { background:"#1e1e1e", border:"1px solid #333", color:"#aaa", fontSize:11, padding:"7px 12px", borderRadius:4, cursor:"pointer", fontFamily:"inherit" },
-    toast: { position:"fixed", bottom:24, right:24, background:"#1e1e1e", border:"1px solid #333", color:"#aaa", fontSize:12, letterSpacing:1.5, padding:"10px 18px", borderRadius:6 },
+    wrap:       { minHeight:"100vh", background:"#0a0a0a", fontFamily:"'DM Mono','Courier New',monospace", color:"#e8e8e8", display:"flex", flexDirection:"column" },
+    header:     { borderBottom:"1px solid #1e1e1e", padding:"20px 24px 16px", display:"flex", alignItems:"flex-end", justifyContent:"space-between" },
+    title:      { fontFamily:"'Bebas Neue',sans-serif", fontSize:32, letterSpacing:3, color:"#f5f5f5", lineHeight:1 },
+    subtitle:   { fontSize:11, color:"#555", letterSpacing:1, marginTop:4 },
+    tabBtn:     (active) => ({ background:active?"#1e1e1e":"transparent", border:`1px solid ${active?"#444":"#222"}`, color:active?"#f5f5f5":"#555", padding:"6px 14px", borderRadius:4, fontSize:11, letterSpacing:1.5, cursor:"pointer", textTransform:"uppercase" }),
+    capture:    { padding:"16px 24px", borderBottom:"1px solid #1a1a1a", background:"#0d0d0d" },
+    textarea:   { flex:1, background:"#141414", border:"1px solid #2a2a2a", borderRadius:6, color:"#f0f0f0", fontSize:14, padding:"10px 14px", resize:"none", fontFamily:"inherit", lineHeight:1.5 },
+    saveBtn:    { background:"#e8e8e8", color:"#0a0a0a", border:"none", borderRadius:6, padding:"10px 18px", fontSize:13, fontWeight:500, cursor:"pointer", letterSpacing:1, fontFamily:"inherit", height:56 },
+    organizeBtn:(loading) => ({ background:"transparent", border:"1px solid #333", color:loading?"#555":"#aaa", fontSize:11, letterSpacing:1.5, padding:"5px 14px", borderRadius:4, cursor:loading?"not-allowed":"pointer", fontFamily:"inherit" }),
+    content:    { flex:1, overflow:"auto", padding:"16px 24px" },
+    empty:      { textAlign:"center", color:"#2a2a2a", marginTop:60 },
+    noteRow:    { background:"#111", border:"1px solid #1e1e1e", borderRadius:6, padding:"12px 14px", display:"flex", gap:12, alignItems:"flex-start", position:"relative" },
+    noteTs:     { fontSize:10, color:"#3a3a3a", letterSpacing:1, paddingTop:2, minWidth:70 },
+    noteText:   { flex:1, fontSize:13, lineHeight:1.6, color:"#d0d0d0" },
+    delBtn:     { background:"none", border:"none", color:"#555", cursor:"pointer", fontSize:14, opacity:0, transition:"opacity 0.15s", padding:"0 4px" },
+    clearBtn:   { background:"none", border:"1px dashed #1e1e1e", color:"#333", fontSize:11, letterSpacing:1.5, padding:"10px", borderRadius:6, cursor:"pointer", marginTop:8, fontFamily:"inherit", width:"100%" },
+    keyArea:    { marginTop:12, display:"flex", gap:8, alignItems:"center" },
+    keyInput:   { flex:1, background:"#141414", border:"1px solid #2a2a2a", borderRadius:4, color:"#aaa", fontSize:11, padding:"7px 10px", fontFamily:"inherit" },
+    keyBtn:     { background:"#1e1e1e", border:"1px solid #333", color:"#aaa", fontSize:11, padding:"7px 12px", borderRadius:4, cursor:"pointer", fontFamily:"inherit" },
+    toast:      { position:"fixed", bottom:24, right:24, background:"#1e1e1e", border:"1px solid #333", color:"#aaa", fontSize:12, letterSpacing:1.5, padding:"10px 18px", borderRadius:6 },
   };
 
   return (
     <div style={S.wrap}>
+      {/* Login overlay — shown only when not authenticated */}
+      {authReady && showLogin && (
+        <LoginScreen onDismiss={() => setShowLogin(false)} />
+      )}
+
       {/* Header */}
       <div style={S.header}>
         <div>
           <div style={S.title}>BRAIN DUMP</div>
           <div style={S.subtitle}>{notes.length} NOTE{notes.length!==1?"S":""} CAPTURED</div>
         </div>
-        <div style={{display:"flex", gap:8}}>
+        <div style={{display:"flex", gap:8, alignItems:"center"}}>
+          <SyncBadge
+            status={syncStatus}
+            user={user}
+            onSignIn={() => setShowLogin(true)}
+            onSignOut={async () => { await sb.auth.signOut(); setUser(null); setSyncStatus("idle"); setShowLogin(true); }}
+          />
           {["notes","actions"].map(v => (
             <button key={v} style={S.tabBtn(view===v)} onClick={()=>setView(v)}>
               {v==="actions"?"⚡ Actions":"📋 Notes"}
@@ -287,7 +585,10 @@ Rules:
               <div style={{display:"flex", flexDirection:"column", gap:8}}>
                 {notes.map((n,i) => (
                   <div key={n.id} className={`note-row${i===0?" note-new":""}`} style={S.noteRow}>
-                    <div style={S.noteTs}>{fmt(n.ts)}</div>
+                    <div style={S.noteTs}>
+                      {fmt(n.ts)}
+                      <DeviceBadge type={n.device_type} />
+                    </div>
                     <div style={S.noteText}>{n.text}</div>
                     <button className="del-btn" style={S.delBtn} onClick={()=>deleteNote(n.id)}>✕</button>
                   </div>
