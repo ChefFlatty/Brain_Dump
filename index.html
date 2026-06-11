@@ -52,9 +52,18 @@ const SUPABASE_KEY = "sb_publishable_xDg6N-K18ZIePDavAN_Fpg_dG496IR5";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-const NOTES_KEY   = "braindump-notes";
-const ACTIONS_KEY = "braindump-actions";
-const APIKEY_KEY  = "braindump-apikey";
+const NOTES_KEY          = "braindump-notes";
+const ACTIONS_KEY        = "braindump-actions";
+const APIKEY_KEY         = "braindump-apikey";
+const PENDING_DELETES_KEY = "braindump-pending-deletes";
+
+const loadPendingDeletes = () => {
+  try { return JSON.parse(localStorage.getItem(PENDING_DELETES_KEY) || "[]"); }
+  catch { return []; }
+};
+const savePendingDeletes = (ids) => {
+  localStorage.setItem(PENDING_DELETES_KEY, JSON.stringify(ids));
+};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const genId = () =>
@@ -162,10 +171,10 @@ function LoginScreen({ onDismiss }) {
 }
 
 // ─── Sync status badge ────────────────────────────────────────────────────────
-function SyncBadge({ status, user, onSignIn, onSignOut }) {
+function SyncBadge({ status, user, onSignIn, onSignOut, onForceSync }) {
   const label = {
     idle:    "OFFLINE",
-    syncing: "SYNCING",
+    syncing: "SYNCING…",
     synced:  "SYNCED",
     error:   "SYNC ERR",
   }[status] || "OFFLINE";
@@ -177,11 +186,18 @@ function SyncBadge({ status, user, onSignIn, onSignOut }) {
     error:   "#c0392b",
   }[status] || "#333";
 
+  const canSync = user && status !== "syncing" && navigator.onLine;
+
   return (
     <div style={{display:"flex", alignItems:"center", gap:8}}>
       {user ? (
         <>
-          <span style={{fontSize:9, letterSpacing:1.5, color, fontFamily:"inherit"}}>{label}</span>
+          <span
+            onClick={canSync ? onForceSync : undefined}
+            title={canSync ? "Tap to force sync" : ""}
+            style={{fontSize:9, letterSpacing:1.5, color, fontFamily:"inherit", cursor:canSync?"pointer":"default", textDecoration:canSync?"underline":"none"}}>
+            {label}
+          </span>
           <button
             onClick={onSignOut}
             title="Sign out"
@@ -260,7 +276,14 @@ function App() {
     try {
       const local = loadLocal();
 
-      // 1. Push unsynced local notes to Supabase
+      // 1. Flush any pending deletes first (so they don't come back on pull)
+      const pending = loadPendingDeletes();
+      if (pending.length) {
+        await Promise.all(pending.map(id => softDelete(id)));
+        savePendingDeletes([]);
+      }
+
+      // 2. Push unsynced local notes to Supabase
       const pushResults = await Promise.all(
         local.filter(n => !n.synced).map(async n => {
           const ok = await pushNote(n, uid);
@@ -269,7 +292,7 @@ function App() {
       );
       const pushedIds = new Set(pushResults.filter(r => r.ok).map(r => r.id));
 
-      // 2. Pull remote notes (from all devices)
+      // 3. Pull remote notes (from all devices)
       const { data: remote, error } = await sb.from("notes")
         .select("id, text, ts, device_type")
         .eq("user_id", uid)
@@ -278,11 +301,13 @@ function App() {
 
       if (error) throw error;
 
-      const localIdSet = new Set(local.map(n => n.id));
+      // IDs we've already deleted locally — don't let them come back
+      const deletedLocally = new Set(loadPendingDeletes());
+      const localIdSet     = new Set(local.map(n => n.id));
 
-      // Notes from other devices that we don't have locally
+      // Notes from other devices that we don't have locally (and haven't deleted)
       const inbound = (remote || [])
-        .filter(r => !localIdSet.has(r.id))
+        .filter(r => !localIdSet.has(r.id) && !deletedLocally.has(r.id))
         .map(r => ({ id: r.id, text: r.text, ts: r.ts, device_type: r.device_type, synced: true }));
 
       // Mark pushed notes as synced
@@ -396,8 +421,15 @@ function App() {
     setNotes(updated);
     saveLocal(updated);
 
-    if (user && note?.synced && navigator.onLine) {
-      await softDelete(id);
+    if (note?.synced) {
+      if (user && navigator.onLine) {
+        // Online — soft-delete in Supabase immediately
+        await softDelete(id);
+      } else {
+        // Offline — queue it so the next sync sends the delete
+        const pending = loadPendingDeletes();
+        if (!pending.includes(id)) savePendingDeletes([...pending, id]);
+      }
     }
   };
 
@@ -524,6 +556,7 @@ Rules:
             user={user}
             onSignIn={() => setShowLogin(true)}
             onSignOut={async () => { await sb.auth.signOut(); setUser(null); setSyncStatus("idle"); setShowLogin(true); }}
+            onForceSync={() => syncAll(user.id)}
           />
           {["notes","actions"].map(v => (
             <button key={v} style={S.tabBtn(view===v)} onClick={()=>setView(v)}>
